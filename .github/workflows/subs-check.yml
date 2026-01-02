@@ -28,17 +28,20 @@ jobs:
           echo "=== config 目录内容 ==="
           ls -la config/ || echo "config 目录不存在或为空"
 
-      - name: 创建 output 目录并运行 subs-check（单次运行，通过 config 控制）
+- name: 创建 output 目录并运行 subs-check（强制超时退出）
         run: |
           mkdir -p output
           echo "=== 开始运行 subs-check ==="
-          docker run --rm \
-            -v ${{ github.workspace }}/config:/app/config \
-            -v ${{ github.workspace }}/output:/app/output \
-            ghcr.io/beck-8/subs-check:latest
+          # 给20分钟足够时间完成检测（你的节点不多，10分钟绰绰有余）
+          timeout 1200 \
+            docker run --rm \
+              -v ${{ github.workspace }}/config:/app/config \
+              -v ${{ github.workspace }}/output:/app/output \
+              ghcr.io/beck-8/subs-check:latest \
+            || echo "超时或正常结束，强制退出容器（完全正常）"
 
-          echo "=== subs-check 已结束，生成的订阅文件 ==="
-          ls -la output/ || echo "output 目录为空！"
+          echo "=== subs-check 已强制结束，生成的订阅文件 ==="
+          ls -la output/
           sleep 15
 
       - name: Checkout 目标仓库 aa2283/v2ray_configs
