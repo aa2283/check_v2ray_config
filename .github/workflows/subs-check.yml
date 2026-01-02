@@ -2,20 +2,20 @@ name: Subscription Checker
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # 每6小时运行一次（UTC时间，北京时间+8小时）
+    - cron: '0 */6 * * *'   # 每6小时运行一次（UTC时间，北京时间对应0、6、12、18点）
   workflow_dispatch:        # 支持手动触发
 
-permissions:                # 关键：允许向仓库推送
-  contents: write
+permissions:
+  contents: write         # 允许向仓库推送（关键！解决403错误）
 
-concurrency:                # 防止多个实例同时运行冲突
+concurrency:
   group: subscription-checker
-  cancel-in-progress: true
+  cancel-in-progress: true  # 防止多个任务同时运行
 
 jobs:
   check-subscriptions:
     runs-on: ubuntu-latest
-    timeout-minutes: 40     # 最多运行40分钟，防止意外卡死
+    timeout-minutes: 40     # 最多运行40分钟
 
     steps:
       - name: Checkout 本仓库（包含 config 文件）
@@ -23,9 +23,9 @@ jobs:
 
       - name: 显示目录结构（方便排错）
         run: |
-          echo "=== 仓库根目录 ==="
+          echo "=== 仓库根目录内容 ==="
           ls -la
-          echo "=== config 目录 ==="
+          echo "=== config 目录内容 ==="
           ls -la config/ || echo "config 目录不存在或为空"
 
       - name: 创建 output 目录并运行 subs-check（强制单次运行）
@@ -35,12 +35,11 @@ jobs:
           docker run --rm \
             -v ${{ github.workspace }}/config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
-            ghcr.io/beck-8/subs-check:latest \
-            --once                                      # 关键参数：强制只检测一次就退出
+            ghcr.io/beck-8/subs-check:latest --once
 
           echo "=== subs-check 已结束，生成的订阅文件 ==="
           ls -la output/ || echo "output 目录为空！请检查 config.yaml"
-          sleep 15  # 保险等待文件完全写入
+          sleep 15  # 等待文件完全写入
 
       - name: Checkout 目标仓库 aa2283/v2ray_configs
         uses: actions/checkout@v4
@@ -53,7 +52,7 @@ jobs:
       - name: 复制文件并只在有变化时推送
         run: |
           echo "=== 开始同步文件到目标仓库 ==="
-          rsync -av --delete output/ target-repo/   # 精准同步并删除多余旧文件
+          rsync -av --delete output/ target-repo/
 
           cd target-repo
 
