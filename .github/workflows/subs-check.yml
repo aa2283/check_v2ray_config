@@ -2,43 +2,45 @@ name: Subscription Checker
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # 每6小时运行一次（UTC 时间）
+    - cron: '0 */6 * * *'   # 每6小时运行一次（UTC时间，北京时间+8小时）
   workflow_dispatch:        # 支持手动触发
 
-permissions:                # ← 关键！赋予推送权限
+permissions:                # 关键：允许向仓库推送
   contents: write
 
-concurrency:                # ← 防止并发冲突
+concurrency:                # 防止多个实例同时运行冲突
   group: subscription-checker
   cancel-in-progress: true
 
 jobs:
   check-subscriptions:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40     # 最多运行40分钟，防止意外卡死
 
     steps:
-      - name: Checkout 本仓库（含 config）
+      - name: Checkout 本仓库（包含 config 文件）
         uses: actions/checkout@v4
 
-      - name: 显示当前目录结构（诊断用）
+      - name: 显示目录结构（方便排错）
         run: |
-          echo "=== 仓库根目录内容 ==="
+          echo "=== 仓库根目录 ==="
           ls -la
-          echo "=== config 目录内容 ==="
-          ls -la config/ || echo "config 目录不存在，请创建并添加 config.yaml"
+          echo "=== config 目录 ==="
+          ls -la config/ || echo "config 目录不存在或为空"
 
-      - name: 创建 output 目录并运行 subs-check
+      - name: 创建 output 目录并运行 subs-check（强制单次运行）
         run: |
           mkdir -p output
-          echo "=== 开始运行 subs-check ==="
+          echo "=== 开始运行 subs-check（只运行一次）==="
           docker run --rm \
             -v ${{ github.workspace }}/config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
-            ghcr.io/beck-8/subs-check:latest    # 推荐用官方镜像
+            ghcr.io/beck-8/subs-check:latest \
+            --once                                      # 关键参数：强制只检测一次就退出
 
-          echo "=== output 目录生成的文件 ==="
-          ls -la output/ || echo "output 为空！检查 config.yaml 是否正确"
+          echo "=== subs-check 已结束，生成的订阅文件 ==="
+          ls -la output/ || echo "output 目录为空！请检查 config.yaml"
+          sleep 15  # 保险等待文件完全写入
 
       - name: Checkout 目标仓库 aa2283/v2ray_configs
         uses: actions/checkout@v4
@@ -50,22 +52,22 @@ jobs:
 
       - name: 复制文件并只在有变化时推送
         run: |
-          echo "=== 开始复制文件到目标仓库 ==="
-          rsync -av --delete output/ target-repo/ || echo "复制过程有警告，但继续"
+          echo "=== 开始同步文件到目标仓库 ==="
+          rsync -av --delete output/ target-repo/   # 精准同步并删除多余旧文件
 
           cd target-repo
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add -A   # 添加所有文件（.yaml .txt .json 等）
+          git add -A
 
           if git diff --staged --quiet; then
             echo "没有文件变化，跳过提交和推送"
           else
-            git commit -m "Auto update subscriptions $(date -u '+%Y-%m-%d %H:%M') UTC"
+            git commit -m "Auto update subscriptions $(date -u '+%Y-%m-%d %H:%M:%S') UTC"
             git push origin HEAD:main || git push origin HEAD:master
             echo "检测到变化，已成功推送！"
           fi
 
-          echo "本次任务完成"
+          echo "本次任务彻底完成"
