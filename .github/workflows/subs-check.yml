@@ -1,4 +1,4 @@
-name: Subscription Checker 永不 canceled 纯净必杀版
+name: Subscription Checker
 
 on:
   schedule:
@@ -43,7 +43,7 @@ jobs:
       - name: Checkout 目标仓库
         uses: actions/checkout@v4
         with:
-          repository: oyunop/v2ray_configs
+          repository: aa2283/v2ray_configs
           token: ${{ secrets.PAT_TOKEN }}
           path: target-repo
           clean: false
