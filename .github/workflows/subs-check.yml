@@ -47,8 +47,6 @@ jobs:
           token: ${{ github.token }}
           path: target-repo
           clean: false
-          persist-credentials: true   # 建议加上，确保 git push 正常
-          fetch-depth: 1
 
       - name: 复制并只在有变化时推送（纯净提交）
         run: |
