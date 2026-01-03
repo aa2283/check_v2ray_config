@@ -25,7 +25,7 @@ jobs:
           docker logs -f checker | while read -r line
           do
             echo "$line"
-            # 匹配你截图中的关键字
+            # 匹配关键字
             if [[ "$line" == *"保存本地成功"* ]]; then
               echo ">>> 检测到保存成功，执行 kill 脚本关闭容器..."
               docker stop checker
