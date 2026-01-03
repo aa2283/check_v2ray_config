@@ -5,7 +5,7 @@ print-progress: true
 concurrent: 200
 
 # 检查间隔(分钟)
-check-interval: -1
+check-interval: 1000000
 
 # 超时时间(毫秒)(节点的最大延迟)
 timeout: 2000
