@@ -17,27 +17,26 @@ jobs:
           echo "当前目录的所有文件:"
           ls -al
 
-- name: Run subscription checker
+- name: Run subscription checker with auto-kill
         run: |
-          # 1. 启动容器（添加 -d 参数让它在后台运行，并命名为 checker）
-          docker run -d --name checker --rm \
+          # 1. 后台启动 Docker 容器
+          docker run -d --name subs_checker --rm \
             -v ${{ github.workspace }}/config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
             ghcr.io/aa2283/subs-check:master
 
-          # 2. 实时监控容器日志
-          echo "正在检测节点，请稍候..."
-          docker logs -f checker | while read line
+          # 2. 循环监控日志，发现“保存成功”后执行 kill
+          echo "开始监控日志..."
+          docker logs -f subs_checker | while read line
           do
-            echo "$line"
-            # 3. 匹配到你日志中的关键字后，立即停止容器
+            echo "$line" # 同步打印日志到控制台
             if [[ "$line" == *"保存本地成功"* ]]; then
-              echo "检测到保存完成，正在关闭程序以进入上传步骤..."
-              docker stop checker
+              echo "检测到保存成功，准备关闭容器..."
+              docker stop subs_checker
               break
             fi
           done
-          echo "检测步骤已结束。"
+          echo "容器已安全关闭，准备进入下一步。"
 
       - name: Checkout target repository
         uses: actions/checkout@v4
