@@ -74,18 +74,22 @@ jobs:
         run: |
           cd target-repo
           
-          # 3. 彻底清理旧文件：删除除了 .git 以外的所有东西，防止文件堆积
-          find . -maxdepth 1 ! -name "." ! -name ".." ! -name ".git" -exec rm -rf {} +
+          # 1. 建立子目录 (如果不存在)
+          mkdir -p sub
           
-          # 4. 同步最新生成的文件
-          cp -rv ../output/* . || echo ">>> 未发现新生成的文件"
+          # 2. 清理旧文件：只清理 sub/ 文件夹内部的文件，不影响仓库根目录或其他文件夹
+          # 这样可以保证这个任务只管自己的 sub 目录
+          find sub/ -maxdepth 1 ! -name "sub/" ! -name "." -exec rm -rf {} +
           
-          # 5. 配置 Git 并提交
+          # 3. 同步最新生成的文件到 sub 文件夹中
+          cp -rv ../output/* sub/ || echo ">>> 未发现新生成的文件"
+          
+          # 4. 配置 Git 并提交
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
-          # 关键修正点：使用 git add -A 记录所有增删，然后提交
           git add -A
-          git commit -m "自动更新订阅：同步结果并清理冗余" || echo ">>> 内容无变更，跳过推送"
+          # 这里的提交信息可以改得更具体一些
+          git commit -m "自动更新订阅：同步至 sub 子目录" || echo ">>> 内容无变更，跳过推送"
           
           git push
