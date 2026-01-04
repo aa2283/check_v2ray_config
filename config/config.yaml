@@ -1,6 +1,7 @@
 # 是否显示进度
 print-progress: true
 
+show-useless-url: true
 # 并发线程数
 concurrent: 200
 
