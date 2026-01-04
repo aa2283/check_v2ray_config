@@ -19,41 +19,55 @@ jobs:
           mkdir -p ${{ github.workspace }}/temp_config
           chmod -R 777 ${{ github.workspace }}/output
 
-          # 2. Python 配置注入
+          # 2. Python 强力重构配置：锁定显示失效链接
           export RAW_URLS_DATA="${{ secrets.SUB_URLS }}"
           python3 -c "
           import os
           template_path = '${{ github.workspace }}/config/config.yaml'
           output_path = '${{ github.workspace }}/temp_config/config.yaml'
+          
+          # 格式化订阅链接
           raw_urls = os.environ.get('RAW_URLS_DATA', '').strip().split('\n')
           formatted_urls = [f'  - \"{u.strip()}\"\n' for u in raw_urls if len(u.strip()) > 10]
-          new_lines = ['show-useless-url: true\n']
+          
+          new_lines = []
+          # 【强制】在文件第一行开启失效链接回显
+          new_lines.append('show-useless-url: true\n')
+          
           if os.path.exists(template_path):
               with open(template_path, 'r', encoding='utf-8') as f:
                   for line in f:
-                      if '{SUB_URLS}' in line: new_lines.extend(formatted_urls)
-                      elif 'show-useless-url' in line: continue
-                      else: new_lines.append(line)
+                      # 关键：彻底剔除模板中可能存在的任何 show-useless-url 设置
+                      if 'show-useless-url' in line:
+                          continue
+                      # 注入订阅地址
+                      if '{SUB_URLS}' in line:
+                          new_lines.extend(formatted_urls)
+                      else:
+                          new_lines.append(line)
           else:
+              # 如果没有模板，生成最简配置
               new_lines.append('sub-urls:\n')
               new_lines.extend(formatted_urls)
+          
           with open(output_path, 'w', encoding='utf-8') as f:
               f.writelines(new_lines)
           "
-          echo ">>> 配置文件已重构：已强制开启失败链接回显。"
+          echo ">>> 配置文件已重构：show-useless-url 已锁定为 true"
 
-          # 3. 后台哨兵：修正后的语法
+          # 3. 后台哨兵：监控 [存盘信号] + [100% 显式倒计时]
           (
             echo ">>> [哨兵] 启动。监控中..."
             HUNDRED_TIME=0
             while true; do
               sleep 10
+              # 容器退出则哨兵也退出
               if ! docker ps | grep -q 'checker'; then break; fi
               
-              # 获取最新日志并清洗 ANSI 颜色码
+              # 抓取日志并清洗颜色代码
               LOGS=$(docker logs --tail 20 checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
               
-              # A计划：监测到存盘信号
+              # A计划：监测到存盘信号（秒杀）
               if echo "$LOGS" | grep -q "保存本地成功"; then
                 echo "------------------------------------------------"
                 echo ">>> [哨兵报告] 命中存盘信号！正在收网同步..."
@@ -62,10 +76,10 @@ jobs:
                 break
               fi
               
-              # B计划：进度 100% 倒计时
+              # B计划：进度 100% 显式倒计时
               if echo "$LOGS" | grep -q "100.0%"; then
                 HUNDRED_TIME=$((HUNDRED_TIME + 10))
-                echo ">>> [哨兵报告] 进度 100%，存盘保底倒计时: ${HUNDRED_TIME}/120 秒"
+                echo ">>> [哨兵报告] 进度 100.0%，存盘保底倒计时: ${HUNDRED_TIME}/120 秒"
                 
                 if [ $HUNDRED_TIME -ge 120 ]; then
                   echo ">>> [哨兵报告] 倒计时结束，执行强制收割！"
@@ -73,18 +87,20 @@ jobs:
                   break
                 fi
               else
+                # 进度未满或未到 100%，重置计时器
                 HUNDRED_TIME=0
               fi
             done
           ) & 
 
-          # 4. 前台运行容器
+          # 4. 前台运行容器：实时看进度和回显 URL
+          # 允许 kill (137) 或 stop (143) 退出码
           docker run --name checker --rm -i \
             -v ${{ github.workspace }}/temp_config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
             ghcr.io/aa2283/subs-check:master || [ $? -eq 137 ] || [ $? -eq 143 ]
           
-          echo ">>> [流程] 检测结束，正在准备推送更新。"
+          echo ">>> [流程] 检测阶段已跳出，准备同步至仓库。"
 
       - name: Checkout target repository
         uses: actions/checkout@v4
