@@ -14,80 +14,59 @@ jobs:
 
       - name: Run subscription checker
         run: |
-          # 1. 初始化工作目录
+          # 1. 初始化目录和配置 (保持之前的 Python 注入逻辑)
           mkdir -p ${{ github.workspace }}/output
           mkdir -p ${{ github.workspace }}/temp_config
           chmod -R 777 ${{ github.workspace }}/output
 
-          # 2. Python 动态重构配置（双引号保护 + 开启 URL 显示）
           export RAW_URLS_DATA="${{ secrets.SUB_URLS }}"
           python3 -c "
           import os
           template_path = '${{ github.workspace }}/config/config.yaml'
           output_path = '${{ github.workspace }}/temp_config/config.yaml'
-          
           raw_urls = os.environ.get('RAW_URLS_DATA', '').strip().split('\n')
           formatted_urls = [f'  - \"{u.strip()}\"\n' for u in raw_urls if len(u.strip()) > 10]
-          
           new_lines = ['show-useless-url: true\n']
           with open(template_path, 'r', encoding='utf-8') as f:
               for line in f:
-                  if '{SUB_URLS}' in line:
-                      new_lines.extend(formatted_urls)
-                  elif 'show-useless-url' in line:
-                      continue
-                  else:
-                      new_lines.append(line)
-          
+                  if '{SUB_URLS}' in line: new_lines.extend(formatted_urls)
+                  elif 'show-useless-url' in line: continue
+                  else: new_lines.append(line)
           with open(output_path, 'w', encoding='utf-8') as f:
               f.writelines(new_lines)
           "
-          echo ">>> 配置文件生成完毕：已注入 ${{ github.workspace }}/temp_config/config.yaml"
 
-          # 3. 后台启动 Docker 容器
-          docker run --name checker -d \
+          # 2. 【核心改动】启动后台哨兵 (先启动，让它盯着待会儿开启的容器)
+          (
+            echo ">>> [哨兵] 已就位，等待存盘信号..."
+            while true; do
+              sleep 5
+              # 如果容器还没启动，继续等
+              if ! docker ps | grep -q 'checker'; then continue; fi
+              
+              # 读取日志末尾
+              LOGS=$(docker logs --tail 10 checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+              
+              if echo "$LOGS" | grep -q "保存本地成功"; then
+                echo "------------------------------------------------"
+                echo ">>> [哨兵] 捕捉到存盘成功！正在强制结束检测..."
+                echo "------------------------------------------------"
+                docker kill checker || true
+                break
+              fi
+            done
+          ) & 
+
+          # 3. 【恢复直观进度】前台运行容器
+          # 去掉 -d，换成 -i，这样你会看到满屏的进度条滚动
+          docker run --name checker --rm -i \
             -v ${{ github.workspace }}/temp_config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
-            ghcr.io/aa2283/subs-check:master
+            ghcr.io/aa2283/subs-check:master || [ $? -eq 137 ] || [ $? -eq 143 ]
+          
+          echo ">>> 检测环节结束，开始同步仓库。"
 
-          # 4. 高频前台监控逻辑
-          echo ">>> 监控已启动，每 5 秒扫描一次信号..."
-          while true; do
-            # 如果容器自己挂了，直接跳出循环
-            if ! docker ps | grep -q 'checker'; then 
-              echo ">>> [提示] 容器已停止运行。"
-              break 
-            fi
-            
-            # 读取最后 5 行日志并清洗 ANSI 颜色码
-            LOG_TAIL=$(docker logs --tail 5 checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
-            
-            # 实时进度反馈（可选，方便在 Actions 界面查看进度）
-            if echo "$LOG_TAIL" | grep -q "检测进度"; then
-               echo ">>> $(echo "$LOG_TAIL" | grep "检测进度" | tail -n 1)"
-            fi
-
-            # 【核心核心】捕捉到保存成功，立即物理断电
-            if echo "$LOG_TAIL" | grep -q "保存本地成功"; then
-              echo "------------------------------------------------"
-              echo ">>> [命中目标] 捕捉到存盘成功信号！"
-              echo ">>> 正在秒杀容器进程以进入同步环节..."
-              echo "------------------------------------------------"
-              docker kill checker || docker stop checker
-              break
-            fi
-            
-            # 100% 进度兜底
-            if echo "$LOG_TAIL" | grep -q "100.0%"; then
-              echo ">>> 进度已满，等待 20 秒存盘缓冲后强制结束..."
-              sleep 20
-              docker kill checker || true
-              break
-            fi
-
-            sleep 5
-          done
-
+      # 4. 后续推送步骤保持不变...
       - name: Checkout target repository
         uses: actions/checkout@v4
         with:
@@ -99,19 +78,9 @@ jobs:
         run: |
           cd target-repo
           mkdir -p sub
-          # 清理旧文件，确保文件夹内只有最新的 all.yaml
           rm -f sub/* || true
           cp -rv ../output/. sub/
-          
-          # Git 配置与推送
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add sub/
-          
-          # 只有在有变动时才提交，避免 Actions 报错
-          if [ -n "$(git status --porcelain)" ]; then
-            git commit -m "自动更新: $(date +'%Y-%m-%d %H:%M')"
-            git push
-          else
-            echo ">>> 数据无变化，跳过本次推送。"
-          fi
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update $(date)" && git push)
