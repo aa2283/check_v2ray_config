@@ -19,42 +19,30 @@ jobs:
           mkdir -p ${{ github.workspace }}/temp_config
           chmod -R 777 ${{ github.workspace }}/output
 
-          # 2. Python 配置注入：强制开启 show-useless-url
+          # 2. Python 配置注入
           export RAW_URLS_DATA="${{ secrets.SUB_URLS }}"
           python3 -c "
           import os
           template_path = '${{ github.workspace }}/config/config.yaml'
           output_path = '${{ github.workspace }}/temp_config/config.yaml'
-          
-          # 处理订阅链接
           raw_urls = os.environ.get('RAW_URLS_DATA', '').strip().split('\n')
           formatted_urls = [f'  - \"{u.strip()}\"\n' for u in raw_urls if len(u.strip()) > 10]
-          
-          new_lines = []
-          # 核心修改：在配置头部强制加入显示链接开关
-          new_lines.append('show-useless-url: true\n')
-          
+          new_lines = ['show-useless-url: true\n']
           if os.path.exists(template_path):
               with open(template_path, 'r', encoding='utf-8') as f:
                   for line in f:
-                      # 替换占位符
-                      if '{SUB_URLS}' in line:
-                          new_lines.extend(formatted_urls)
-                      # 过滤掉模板中可能存在的旧开关，确保使用头部的 true
-                      elif 'show-useless-url' in line:
-                          continue
-                      else:
-                          new_lines.append(line)
+                      if '{SUB_URLS}' in line: new_lines.extend(formatted_urls)
+                      elif 'show-useless-url' in line: continue
+                      else: new_lines.append(line)
           else:
               new_lines.append('sub-urls:\n')
               new_lines.extend(formatted_urls)
-          
           with open(output_path, 'w', encoding='utf-8') as f:
               f.writelines(new_lines)
           "
           echo ">>> 配置文件已重构：已强制开启失败链接回显。"
 
-          # 3. 后台哨兵：显式数秒 + 存盘秒杀
+          # 3. 后台哨兵：修正后的语法
           (
             echo ">>> [哨兵] 启动。监控中..."
             HUNDRED_TIME=0
@@ -65,22 +53,22 @@ jobs:
               # 获取最新日志并清洗 ANSI 颜色码
               LOGS=$(docker logs --tail 20 checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
               
-              # A计划：监测到存盘信号（最高优先级）
-              if echo \"$LOGS\" | grep -q \"保存本地成功\"; then
-                echo \"------------------------------------------------\"
-                echo \">>> [哨兵报告] 命中存盘信号！正在收网同步...\"
-                echo \"------------------------------------------------\"
+              # A计划：监测到存盘信号
+              if echo "$LOGS" | grep -q "保存本地成功"; then
+                echo "------------------------------------------------"
+                echo ">>> [哨兵报告] 命中存盘信号！正在收网同步..."
+                echo "------------------------------------------------"
                 docker kill checker || true
                 break
               fi
               
               # B计划：进度 100% 倒计时
-              if echo \"$LOGS\" | grep -q \"100.0%\"; then
+              if echo "$LOGS" | grep -q "100.0%"; then
                 HUNDRED_TIME=$((HUNDRED_TIME + 10))
-                echo \">>> [哨兵报告] 进度 100%，存盘保底倒计时: ${HUNDRED_TIME}/120 秒\"
+                echo ">>> [哨兵报告] 进度 100%，存盘保底倒计时: ${HUNDRED_TIME}/120 秒"
                 
                 if [ $HUNDRED_TIME -ge 120 ]; then
-                  echo \">>> [哨兵报告] 倒计时结束，执行强制收割！\"
+                  echo ">>> [哨兵报告] 倒计时结束，执行强制收割！"
                   docker kill checker || true
                   break
                 fi
@@ -90,7 +78,7 @@ jobs:
             done
           ) & 
 
-          # 4. 前台运行：实时展示进度条和 404 报错链接
+          # 4. 前台运行容器
           docker run --name checker --rm -i \
             -v ${{ github.workspace }}/temp_config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
@@ -98,7 +86,6 @@ jobs:
           
           echo ">>> [流程] 检测结束，正在准备推送更新。"
 
-      # 5. 推送到目标仓库
       - name: Checkout target repository
         uses: actions/checkout@v4
         with:
@@ -112,11 +99,9 @@ jobs:
           mkdir -p sub
           rm -f sub/* || true
           cp -rv ../output/. sub/
-          
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add sub/
-          
           if [ -n "$(git status --porcelain)" ]; then
             git commit -m "自动更新: $(date +'%Y-%m-%d %H:%M')"
             git push
