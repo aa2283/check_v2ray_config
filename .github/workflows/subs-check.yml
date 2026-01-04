@@ -12,7 +12,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-    - name: Run subscription checker
+      - name: Run subscription checker
         run: |
           mkdir -p ${{ github.workspace }}/output
           mkdir -p ${{ github.workspace }}/temp_config
