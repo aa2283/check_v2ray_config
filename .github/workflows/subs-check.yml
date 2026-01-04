@@ -1,53 +1,40 @@
-name: Subscription Checker
-
-on:
-  schedule:
-    - cron: '15 4 * * *'
-  workflow_dispatch:
-
-jobs:
-  check-subscriptions:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Run subscription checker
+- name: Run subscription checker
         run: |
-          # 1. 建立临时工作区
+          # 1. 准备环境
           mkdir -p ${{ github.workspace }}/output
           mkdir -p ${{ github.workspace }}/temp_config
           chmod -R 777 ${{ github.workspace }}/output
 
-          # 2. 秘密替换逻辑 (Python 强力注入)
-          # 把 Secret 内容导出为环境变量供 Python 使用
+          # 2. 注入 Secret (剔除 README.md 后剩下的 26 条)
           export RAW_URLS_DATA="${{ secrets.SUB_URLS }}"
           
           python3 -c "
           import os
           template_path = '${{ github.workspace }}/config/config.yaml'
+          output_path = '${{ github.workspace }}/temp_config/config.yaml'
+          
           with open(template_path, 'r', encoding='utf-8') as f:
-              content = f.read()
+              lines = f.readlines()
           
-          # 提取环境变量中的链接
           raw_urls = os.environ.get('RAW_URLS_DATA', '').strip().split('\n')
-          # 格式化为 YAML 列表项 (保持缩进)
-          yaml_lines = [f'  - {u.strip()}' for u in raw_urls if u.strip()]
-          replacement = '\n'.join(yaml_lines)
+          # 过滤掉空行和可能残留的 README 链接
+          clean_urls = [u.strip() for u in raw_urls if u.strip() and 'README.md' not in u]
           
-          # 查找并替换你的占位符 - {SUB_URLS}
-          if '- {SUB_URLS}' in content:
-              new_content = content.replace('- {SUB_URLS}', replacement)
-          else:
-              # 兼容性处理：如果没有横杠也尝试替换
-              new_content = content.replace('{SUB_URLS}', replacement)
-              
-          with open('${{ github.workspace }}/temp_config/config.yaml', 'w', encoding='utf-8') as f:
-              f.write(new_content)
+          new_lines = []
+          for line in lines:
+              if '{SUB_URLS}' in line:
+                  for url in clean_urls:
+                      # 关键：给 URL 加上双引号，防止 YAML 解析报错
+                      new_lines.append(f'  - \"{url}\"\n')
+              else:
+                  new_lines.append(line)
+          
+          with open(output_path, 'w', encoding='utf-8') as f:
+              f.writelines(new_lines)
           "
-          echo ">>> 秘密链接已成功注入模板，占位符 {SUB_URLS} 已失效。"
+          echo ">>> 已注入 ${{ secrets.SUB_URLS != '' && '26' || '0' }} 条链接，已强制添加双引号保护。"
 
-          # 3. 智能观察者 (实时监控日志)
+          # 3. 智能观察者
           (
             echo ">>> [观察者] 监控启动..."
             TIMER_STARTED=false 
@@ -55,53 +42,24 @@ jobs:
               sleep 20
               if ! docker ps | grep -q "checker"; then break; fi
               
-              # 清理日志中的 ANSI 颜色代码
-              LOG_RAW=$(docker logs checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+              LOG_RAW=$(docker logs checker 2>&1 | tail -n 10 | sed 's/\x1b\[[0-9;]*m//g')
               
-              # A. 正常完成信号
               if echo "$LOG_RAW" | grep -q "保存本地成功"; then
-                echo ">>> [观察者] 检测到保存成功，任务圆满结束。"
+                echo ">>> [观察者] 任务完成。"
                 docker stop checker
                 break
               fi
 
-              # B. 100% 进度死循环处理 (处理 9430/9431 顽疾)
               if [[ "$TIMER_STARTED" = false ]] && echo "$LOG_RAW" | grep -q "100.0%"; then
                 TIMER_STARTED=true
-                if echo "$LOG_RAW" | grep -qE "\(([0-9]+)/\1\)"; then
-                   echo ">>> [观察者] 进度真对齐 (100.0%)，2分钟后强制收割..."
-                   (sleep 120; docker stop checker || true) &
-                else
-                   # 即使差一两个节点没跑完，也强制收割，保护已有的 9430 个成果
-                   echo ">>> [观察者] 进度接近 100%，开启 5 分钟保底强杀..."
-                   (sleep 300; docker stop checker || true) &
-                fi
+                echo ">>> [观察者] 进度 100%，给 5 分钟缓冲存盘..."
+                (sleep 300; docker stop checker || true) &
               fi
             done
           ) &
 
-          # 4. 运行容器 (挂载注入了 Secret 的临时配置)
+          # 4. 运行
           docker run --name checker --rm -i --init \
             -v ${{ github.workspace }}/temp_config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
-            ghcr.io/aa2283/subs-check:master || echo ">>> 容器停止。"
-
-      - name: Checkout target repository
-        uses: actions/checkout@v4
-        with:
-          repository: aa2283/v2ray_configs
-          token: ${{ secrets.PAT_TOKEN }}
-          path: target-repo
-
-      - name: Copy and commit changes
-        run: |
-          cd target-repo
-          TARGET_DIR="sub" 
-          mkdir -p $TARGET_DIR
-          rm -rf $TARGET_DIR/*
-          cp -rv ../output/. $TARGET_DIR/ || echo ">>> 警告：未发现输出文件"
-          
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add $TARGET_DIR/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "自动更新：同步订阅检测结果" && git push)
+            ghcr.io/aa2283/subs-check:master
