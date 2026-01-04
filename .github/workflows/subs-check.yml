@@ -19,17 +19,15 @@ jobs:
           mkdir -p ${{ github.workspace }}/temp_config
           chmod -R 777 ${{ github.workspace }}/output
 
-          # 2. Python 强力重构：直接在配置阶段混淆链接（破解 GitHub 打码）
+          # 2. Python 源头混淆：将 http 替换为 h_t_t_p 绕过 GitHub 遮蔽
           export RAW_URLS_DATA="${{ secrets.SUB_URLS }}"
           python3 -c "
           import os
           template_path = '${{ github.workspace }}/config/config.yaml'
           output_path = '${{ github.workspace }}/temp_config/config.yaml'
-          
           raw_urls = os.environ.get('RAW_URLS_DATA', '').strip().split('\n')
-          # 关键：在配置里就混淆链接，躲避 GitHub Secret 扫描
+          # 在注入前就把链接改名
           formatted_urls = [f'  - \"{u.strip().replace(\"http\", \"h_t_t_p\")}\"\n' for u in raw_urls if len(u.strip()) > 10]
-          
           new_lines = ['show-useless-url: true\n']
           if os.path.exists(template_path):
               with open(template_path, 'r', encoding='utf-8') as f:
@@ -40,30 +38,37 @@ jobs:
           else:
               new_lines.append('sub-urls:\n')
               new_lines.extend(formatted_urls)
-          
           with open(output_path, 'w', encoding='utf-8') as f:
               f.writelines(new_lines)
           "
           echo ">>> 链接混淆已完成，准备丝滑运行..."
 
-          # 3. 后台哨兵 (增加对混淆链接的识别)
+          # 3. 后台哨兵 (使用单引号修复语法错误)
           (
+            echo '>>> [哨兵] 启动。监控中...'
             HUNDRED_TIME=0
             while true; do
               sleep 10
               if ! docker ps | grep -q 'checker'; then break; fi
+              
+              # 清洗日志颜色代码
               LOGS=$(docker logs --tail 20 checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
               
-              if echo \"$LOGS\" | grep -q \"保存本地成功\"; then
-                echo \">>> [哨兵] 命中存盘信号，收工！\"
+              # 情况 A: 存盘成功
+              if echo "$LOGS" | grep -q '保存本地成功'; then
+                echo '------------------------------------------------'
+                echo '>>> [哨兵报告] 命中存盘信号！正在收网同步...'
+                echo '------------------------------------------------'
                 docker kill checker || true
                 break
               fi
               
-              if echo \"$LOGS\" | grep -q \"100.0%\"; then
+              # 情况 B: 100% 倒计时
+              if echo "$LOGS" | grep -q '100.0%'; then
                 HUNDRED_TIME=$((HUNDRED_TIME + 10))
-                echo \">>> [哨兵] 进度 100%，倒计时: ${HUNDRED_TIME}/120\"
+                echo ">>> [哨兵报告] 进度 100%，倒计时: ${HUNDRED_TIME}/120"
                 if [ $HUNDRED_TIME -ge 120 ]; then
+                  echo '>>> [哨兵报告] 倒计时结束，强制收割！'
                   docker kill checker || true
                   break
                 fi
@@ -73,13 +78,13 @@ jobs:
             done
           ) & 
 
-          # 4. 前台运行：去掉 sed，保证进度条像丝一样顺滑
+          # 4. 前台运行：不加任何拦截，保证进度条最流畅
           docker run --name checker --rm -i \
             -v ${{ github.workspace }}/temp_config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
             ghcr.io/aa2283/subs-check:master || [ $? -eq 137 ] || [ $? -eq 143 ]
           
-          echo ">>> 检测结束。"
+          echo ">>> [流程] 检测结束，准备同步。"
           
       - name: Checkout target repository
         uses: actions/checkout@v4
