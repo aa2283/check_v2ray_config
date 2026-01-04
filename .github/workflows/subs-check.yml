@@ -14,69 +14,77 @@ jobs:
 
       - name: Run subscription checker
         run: |
-          # 1. 环境彻底清理
-          rm -rf ${{ github.workspace }}/output ${{ github.workspace }}/config
-          mkdir -p ${{ github.workspace }}/output ${{ github.workspace }}/config
-          
-          # 2. 静态生成配置文件 (添加更多控制参数防止自冲突)
-          cat <<EOF > ${{ github.workspace }}/config/config.yaml
-          show-progress: true
-          print-progress: true
-          # 禁用镜像自带的定时，防止干扰
-          cron: "" 
-          sub-urls:
-          $(echo "${{ secrets.SUB_URLS }}" | sed 's/^/  - /')
-          EOF
-          
-          # 关键：给配置文件一个过去的时间戳，防止容器启动后认为文件是“新改动”的
-          touch -d "2 hours ago" ${{ github.workspace }}/config/config.yaml
-          chmod -R 777 ${{ github.workspace }}/output ${{ github.workspace }}/config
+          # 1. 建立临时工作区
+          mkdir -p ${{ github.workspace }}/output
+          mkdir -p ${{ github.workspace }}/temp_config
+          chmod -R 777 ${{ github.workspace }}/output
 
-          # 3. 强化版观察者
+          # 2. 秘密替换逻辑 (Python 强力注入)
+          # 把 Secret 内容导出为环境变量供 Python 使用
+          export RAW_URLS_DATA="${{ secrets.SUB_URLS }}"
+          
+          python3 -c "
+          import os
+          template_path = '${{ github.workspace }}/config/config.yaml'
+          with open(template_path, 'r', encoding='utf-8') as f:
+              content = f.read()
+          
+          # 提取环境变量中的链接
+          raw_urls = os.environ.get('RAW_URLS_DATA', '').strip().split('\n')
+          # 格式化为 YAML 列表项 (保持缩进)
+          yaml_lines = [f'  - {u.strip()}' for u in raw_urls if u.strip()]
+          replacement = '\n'.join(yaml_lines)
+          
+          # 查找并替换你的占位符 - {SUB_URLS}
+          if '- {SUB_URLS}' in content:
+              new_content = content.replace('- {SUB_URLS}', replacement)
+          else:
+              # 兼容性处理：如果没有横杠也尝试替换
+              new_content = content.replace('{SUB_URLS}', replacement)
+              
+          with open('${{ github.workspace }}/temp_config/config.yaml', 'w', encoding='utf-8') as f:
+              f.write(new_content)
+          "
+          echo ">>> 秘密链接已成功注入模板，占位符 {SUB_URLS} 已失效。"
+
+          # 3. 智能观察者 (实时监控日志)
           (
-            echo ">>> [观察者] 已启动..."
+            echo ">>> [观察者] 监控启动..."
             TIMER_STARTED=false 
-            
             while true; do
               sleep 20
-              # 扩大日志观察范围，捕捉可能产生的进度条
+              if ! docker ps | grep -q "checker"; then break; fi
+              
+              # 清理日志中的 ANSI 颜色代码
               LOG_RAW=$(docker logs checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
               
-              # A. 捕获任务完成
+              # A. 正常完成信号
               if echo "$LOG_RAW" | grep -q "保存本地成功"; then
-                echo ">>> [观察者] 检测到保存成功，正常收工。"
+                echo ">>> [观察者] 检测到保存成功，任务圆满结束。"
                 docker stop checker
                 break
               fi
 
-              # B. 捕捉进度条 (哪怕是冲突了，第一个任务也会产生进度)
+              # B. 100% 进度死循环处理 (处理 9430/9431 顽疾)
               if [[ "$TIMER_STARTED" = false ]] && echo "$LOG_RAW" | grep -q "100.0%"; then
                 TIMER_STARTED=true
                 if echo "$LOG_RAW" | grep -qE "\(([0-9]+)/\1\)"; then
-                   echo ">>> [观察者] 真100%，给 2 分钟缓冲存盘..."
+                   echo ">>> [观察者] 进度真对齐 (100.0%)，2分钟后强制收割..."
                    (sleep 120; docker stop checker || true) &
                 else
-                   echo ">>> [观察者] 假100% (9430/9431)，给 5 分钟强杀..."
+                   # 即使差一两个节点没跑完，也强制收割，保护已有的 9430 个成果
+                   echo ">>> [观察者] 进度接近 100%，开启 5 分钟保底强杀..."
                    (sleep 300; docker stop checker || true) &
                 fi
               fi
-
-              # C. 处理冲突警告（如果看到冲突，说明第一个任务已经起飞了，我们只需要等它）
-              if echo "$LOG_RAW" | grep -q "已有检测正在进行"; then
-                 echo ">>> [观察者] 正在等待后台的首个任务完成，请稍后..."
-                 # 这种情况下不要 stop，让它跑
-              fi
-
-              if ! docker ps | grep -q "checker"; then break; fi
             done
           ) &
 
-          # 4. 运行容器
-          # 使用 -i (交互) 但不加 -t，能让进度条更好地在日志里刷新
+          # 4. 运行容器 (挂载注入了 Secret 的临时配置)
           docker run --name checker --rm -i --init \
-            -v ${{ github.workspace }}/config:/app/config \
+            -v ${{ github.workspace }}/temp_config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
-            ghcr.io/aa2283/subs-check:master || echo ">>> 运行结束。"
+            ghcr.io/aa2283/subs-check:master || echo ">>> 容器停止。"
 
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -91,9 +99,9 @@ jobs:
           TARGET_DIR="sub" 
           mkdir -p $TARGET_DIR
           rm -rf $TARGET_DIR/*
-          cp -rv ../output/. $TARGET_DIR/ || echo ">>> 警告：output 文件夹空空如也！"
+          cp -rv ../output/. $TARGET_DIR/ || echo ">>> 警告：未发现输出文件"
           
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add $TARGET_DIR/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "自动更新" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "自动更新：同步订阅检测结果" && git push)
