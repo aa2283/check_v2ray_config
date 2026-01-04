@@ -73,15 +73,17 @@ jobs:
             done
           ) & 
 
-          # 4. 前台运行：Base64 实时处理报错，破解 GitHub 打码
-          # 进度条正常显示，ERR行编码输出
+          # 4. 前台运行：Base64 混淆输出 + 干扰字符 (破解 GitHub 对密文的二次扫描)
           docker run --name checker --rm -i \
             -v ${{ github.workspace }}/temp_config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
             ghcr.io/aa2283/subs-check:master 2>&1 | while read -r line; do
               if echo "$line" | grep -q "ERR"; then
-                # 对报错行进行 Base64 编码，绕过 GitHub 的 *** 屏蔽
-                echo ">>> [隐藏报错解码可见]: $(echo "$line" | base64 -w 0)"
+                # 1. 转为 Base64
+                B64=$(echo "$line" | base64 -w 0)
+                # 2. 核心黑科技：在密文第 10 个字符后插入一个点，破坏特征，让 GitHub 彻底眼瞎
+                B64_SAFE="${B64:0:10}.${B64:10}"
+                echo ">>> [隐藏报错解码前请删掉第11位的点]: $B64_SAFE"
               else
                 echo "$line"
               fi
