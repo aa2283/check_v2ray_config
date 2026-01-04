@@ -2,8 +2,8 @@ name: Subscription Checker
 
 on:
   schedule:
-    - cron: '15 4 * * *'
-  workflow_dispatch:
+    - cron: '15 4 * * *'  # 每天北京时间 12:15 运行
+  workflow_dispatch:      # 允许手动点击运行
 
 jobs:
   check-subscriptions:
@@ -14,32 +14,61 @@ jobs:
 
       - name: Run subscription checker
         run: |
+          # 0. 准备输出目录
           mkdir -p ${{ github.workspace }}/output
           chmod -R 777 ${{ github.workspace }}/output
 
+          # 1. 智能守护监听器 (带可视化倒计时提示)
           (
-            echo ">>> [观察者] 已启动..."
+            echo ">>> [观察者] 已启动，正在监控任务状态..."
             WAS_HUNDRED=false
+            
             while true; do
-              sleep 10
+              sleep 10  # 每 10 秒扫描一次日志
+              
+              # 获取最后几行日志并去除颜色代码
               LOG_TAIL=$(docker logs checker 2>&1 | tail -n 5 | sed 's/\x1b\[[0-9;]*m//g')
+              
+              # 情况 A: 正常探测到程序输出“保存本地成功”
               if echo "$LOG_TAIL" | grep -q "保存本地成功"; then
+                echo -e "\n[观察者] 捕获到程序自然存盘信号，正在解锁流程..."
                 docker stop checker
                 break
               fi
+
+              # 情况 B: 进度达到 100.0%，开启可视化倒计时
               if [[ "$WAS_HUNDRED" = false ]] && echo "$LOG_TAIL" | grep -q "100.0%"; then
+                echo -e "\n[重要提示] >>> 进度已达 100.0% <<<"
+                echo ">>> 开启 3 分钟最终宽限时间，等待最后一个节点收尾..."
                 WAS_HUNDRED=true
-                ( sleep 180 && docker stop checker || true ) &
+                # 在后台异步执行可视化倒计时
+                (
+                  for i in {180..10..10}; do
+                    REMAIN=$((180 - i))
+                    if ! docker ps | grep -q "checker"; then break; fi
+                    echo ">>> [宽限倒计时] 已等待 ${i}秒，剩余约 ${REMAIN}秒..."
+                    sleep 10
+                  done
+                  
+                  if docker ps | grep -q "checker"; then
+                    echo -e "\n[观察者] 3 分钟宽限期满，强制收割残留进程..."
+                    docker stop checker
+                  fi
+                ) &
               fi
+
+              # 如果容器已经自然退出，观察者也退出
               if ! docker ps | grep -q "checker"; then break; fi
             done
           ) &
 
+          # 2. 正式运行容器 (TTY 模式保证过程显示)
+          echo ">>> 正在启动检测引擎 (实时进度模式)..."
           docker run --name checker --rm -t \
             -v ${{ github.workspace }}/config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
             -e SUB_URLS="${{ secrets.SUB_URLS }}" \
-            ghcr.io/aa2283/subs-check:master || echo ">>> 运行结束"
+            ghcr.io/aa2283/subs-check:master || echo ">>> 容器运行结束。"
 
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -52,20 +81,17 @@ jobs:
         run: |
           cd target-repo
           
-          # 1. 确保 sub 目录存在且是一个真正的文件夹
-          # 如果 sub 已经是一个文件，先删掉它
+          # 3. 目录与清理逻辑
           if [ -f "sub" ]; then rm -f sub; fi
           mkdir -p sub
-          
-          # 2. 清理 sub/ 目录下的旧文件 (保留子目录结构)
           rm -rf sub/*
           
-          # 3. 同步最新生成的文件到 sub/ 目录下 [修正关键点：末尾带斜杠]
+          # 4. 同步最新生成的文件到 sub/ 文件夹
           cp -rv ../output/. sub/ || echo ">>> 未发现新生成的文件"
           
-          # 4. Git 提交并推送
+          # 5. Git 提交
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
           git add sub/
+          # 检查是否有变动，有则推送
           git diff --quiet && git diff --staged --quiet || (git commit -m "自动更新订阅：同步至 sub 子目录" && git push)
