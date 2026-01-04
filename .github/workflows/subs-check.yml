@@ -14,77 +14,65 @@ jobs:
 
       - name: Run subscription checker
         run: |
-          # 创建必要的临时目录
-          mkdir -p ${{ github.workspace }}/output
-          mkdir -p ${{ github.workspace }}/config
-          chmod -R 777 ${{ github.workspace }}/output
-          chmod -R 777 ${{ github.workspace }}/config
+          # 1. 准备工作：先清理并创建目录
+          rm -rf ${{ github.workspace }}/output ${{ github.workspace }}/config
+          mkdir -p ${{ github.workspace }}/output ${{ github.workspace }}/config
+          chmod -R 777 ${{ github.workspace }}/output ${{ github.workspace }}/config
 
-          # --- 步骤 1：从 Secret 动态生成 config.yaml (隐私保护核心) ---
-          echo "sub-urls:" > ${{ github.workspace }}/config/config.yaml
-          # 将 Secret 中的链接逐行添加 "  - " 前缀并写入文件
-          echo "${{ secrets.SUB_URLS }}" | sed 's/^/  - /' >> ${{ github.workspace }}/config/config.yaml
+          # 2. 核心修正：在启动 Docker 之前彻底完成配置文件的写入
+          # 这样容器启动时读取的是“静态文件”，不会触发“配置文件监听”的并发 Bug
+          cat <<EOF > ${{ github.workspace }}/config/config.yaml
+          sub-urls:
+          $(echo "${{ secrets.SUB_URLS }}" | sed 's/^/  - /')
+          show-progress: true
+          EOF
           
-          echo ">>> 配置文件已生成 (订阅链接已通过 Secret 注入)"
-          # -------------------------------------------------------
+          echo ">>> 配置文件静态写入完成。"
 
-          # --- 步骤 2：启动智能观察者 (实时监控与双轨倒计时) ---
+          # 3. 智能观察者 (逻辑保持，但增加对“跳过”情况的监控)
           (
-            echo ">>> [观察者] 已启动，正在监控任务进度..."
+            echo ">>> [观察者] 已启动..."
             TIMER_STARTED=false 
             
             while true; do
               sleep 10
-              # 提取容器日志，过滤颜色代码
-              LOG_RAW=$(docker logs checker 2>&1 | tail -n 5 | sed 's/\x1b\[[0-9;]*m//g')
+              LOG_RAW=$(docker logs checker 2>&1 | tail -n 10 | sed 's/\x1b\[[0-9;]*m//g')
               
-              # A. 正常存盘信号 (捕获到直接结束)
-              if echo "$LOG_RAW" | grep -q "保存本地成功"; then
-                echo -e "\n[观察者] 任务圆满完成，正常关闭容器。"
+              # 如果发现“跳过本次检测”，说明容器逻辑乱了，直接重启容器或强制杀掉
+              if echo "$LOG_RAW" | grep -q "已有检测正在进行"; then
+                echo ">>> [警告] 检测到并发冲突，强制终止并尝试收割..."
                 docker stop checker
                 break
               fi
 
-              # B. 进度达 100.0% 时的处理逻辑
-              if [[ "$TIMER_STARTED" = false ]] && echo "$LOG_RAW" | grep -q "100.0%"; then
-                TIMER_STARTED=true
-                
-                # 识别真假 100%：检查括号内数字是否对齐 (如 9431/9431)
-                if echo "$LOG_RAW" | grep -qE "\(([0-9]+)/\1\)"; then
-                   WAIT_TIME=120
-                   echo -e "\n[观察者] 检测到真 100% (数字对齐)，开启 2 分钟存盘缓冲..."
-                else
-                   WAIT_TIME=300
-                   CURRENT_PROG=$(echo "$LOG_RAW" | grep -o "[0-9]*/[0-9]*" | tail -n 1)
-                   echo -e "\n[观察者] 检测到假 100% ($CURRENT_PROG)，最后一个节点卡死，开启 5 分钟强杀倒计时..."
-                fi
-                
-                # 开启倒计时收割子进程
-                (
-                  MAX_STEPS=$((WAIT_TIME / 10))
-                  for ((i=1; i<=MAX_STEPS; i++)); do
-                    sleep 10
-                    if ! docker ps | grep -q "checker"; then exit 0; fi
-                    PAST=$((i * 10))
-                    LEFT=$((WAIT_TIME - PAST))
-                    echo ">>> [缓冲倒计时] 已等待 ${PAST}s，剩余宽限 ${LEFT}s..."
-                  done
-                  
-                  if docker ps | grep -q "checker"; then
-                    echo ">>> [观察者] 时间到！强杀容器并收割已测得的节点结果。"
-                    docker stop checker
-                  fi
-                ) &
+              if echo "$LOG_RAW" | grep -q "保存本地成功"; then
+                echo ">>> [观察者] 任务圆满完成。"
+                docker stop checker
+                break
               fi
 
-              # 如果容器已经退出，观察者也退出
+              # 进度对齐逻辑
+              if [[ "$TIMER_STARTED" = false ]] && echo "$LOG_RAW" | grep -q "100.0%"; then
+                TIMER_STARTED=true
+                if echo "$LOG_RAW" | grep -qE "\(([0-9]+)/\1\)"; then
+                   WAIT_TIME=120
+                   echo ">>> [观察者] 数字真对齐，开启 2 分钟存盘缓冲..."
+                else
+                   WAIT_TIME=300
+                   echo ">>> [观察者] 数字未对齐，开启 5 分钟强杀..."
+                fi
+                (
+                  sleep $WAIT_TIME
+                  docker stop checker || true
+                ) &
+              fi
               if ! docker ps | grep -q "checker"; then break; fi
             done
           ) &
 
-          # --- 步骤 3：正式运行 Docker 容器 ---
-          # 注意：通过挂载生成的 config 目录，容器会自动读取 Secret 注入的链接
-          docker run --name checker --rm -t \
+          # 4. 运行容器
+          # 增加 --init 解决进程信号传递问题，确保进程能被正常杀掉并触发存盘
+          docker run --name checker --rm -t --init \
             -v ${{ github.workspace }}/config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
             ghcr.io/aa2283/subs-check:master || echo ">>> 容器运行结束。"
@@ -99,19 +87,12 @@ jobs:
       - name: Copy and commit changes
         run: |
           cd target-repo
-          
-          # --- 设置存放结果的文件夹名称 ---
           TARGET_DIR="sub" 
-          # ------------------------------
-
           mkdir -p $TARGET_DIR
           rm -rf $TARGET_DIR/*
-          cp -rv ../output/. $TARGET_DIR/ || echo ">>> 未发现新生成的文件"
+          cp -rv ../output/. $TARGET_DIR/ || echo ">>> 警告：output 目录是空的，没有生成文件！"
           
-          # 配置 Git 信息
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
-          # 添加更改并提交
           git add $TARGET_DIR/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "自动更新：检测完成，同步结果至 $TARGET_DIR" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "自动更新：同步结果" && git push)
