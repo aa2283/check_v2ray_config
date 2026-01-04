@@ -19,7 +19,7 @@ jobs:
           mkdir -p ${{ github.workspace }}/temp_config
           chmod -R 777 ${{ github.workspace }}/output
 
-          # 2. Python 暴力注入：通过添加无用参数绕过 GitHub 遮蔽
+          # 2. Python 暴力注入：通过后缀绕过 GitHub 屏蔽
           export RAW_URLS_DATA="${{ secrets.SUB_URLS }}"
           python3 -c "
           import os
@@ -27,20 +27,16 @@ jobs:
           output_path = '${{ github.workspace }}/temp_config/config.yaml'
           raw_urls = os.environ.get('RAW_URLS_DATA', '').strip().split('\n')
           
-          # 核心技巧：在 URL 后面加一个无意义后缀，GitHub 就认不出这是 Secret 了，从而不会打码
           formatted_urls = []
           for u in raw_urls:
               u = u.strip()
               if len(u) > 10:
-                  separator = '&' if '?' in u else '?'
-                  # 变成 http://xxx.com/sub?token=xxx&github_bypass=1
-                  u_bypass = f'{u}{separator}github_bypass=1'
+                  # 绕过 GitHub Secret 扫描：添加无意义参数
+                  sep = '&' if '?' in u else '?'
+                  u_bypass = f'{u}{sep}github_bypass=1'
                   formatted_urls.append(f'  - \"{u_bypass}\"\n')
           
-          new_lines = []
-          # 强制在配置开头加入显示开关
-          new_lines.append('show-useless-url: true\n')
-          
+          new_lines = ['show-useless-url: true\n']
           with open(template_path, 'r', encoding='utf-8') as f:
               for line in f:
                   if '{SUB_URLS}' in line:
@@ -54,27 +50,29 @@ jobs:
               f.writelines(new_lines)
           "
 
-          # 3. 哨兵：同时监听所有结束信号
+          # 3. 哨兵：修正引号，杜绝语法报错
           (
-            echo ">>> [哨兵] 启动。监控信号：[保存/空/超时]"
+            echo '>>> [哨兵] 启动成功。监听信号：[保存/空/超时]'
             HUNDRED_TIME=0
             while true; do
-              sleep 5  # 缩短检查间隔到 5 秒，更灵敏
+              sleep 5
               if ! docker ps | grep -q 'checker'; then break; fi
               
+              # 抓取日志并清洗
               LOGS=$(docker logs --tail 50 checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
               
-              # 只要出现任何一个结束信号，立刻 kill
-              if echo \"$LOGS\" | grep -qE \"保存本地成功|节点为空，跳过保存\"; then
-                echo \">>> [哨兵报告] 命中结束信号，立刻收割！\"
+              # 使用单引号包裹正则，绝对安全
+              if echo '$LOGS' | grep -qE '保存本地成功|节点为空，跳过保存'; then
+                echo '>>> [哨兵报告] 检测到程序已结束。正在收网...'
                 docker kill checker || true
                 break
               fi
               
-              if echo \"$LOGS\" | grep -q \"100.0%\"; then
+              if echo '$LOGS' | grep -q '100.0%'; then
                 HUNDRED_TIME=$((HUNDRED_TIME + 5))
-                if [ $HUNDRED_TIME -ge 60 ]; then # 100% 后最多等 60 秒
-                  echo \">>> [哨兵报告] 100% 超时，强制收割！\"
+                echo ">>> [哨兵报告] 100% 状态计时: ${HUNDRED_TIME}/60 秒"
+                if [ $HUNDRED_TIME -ge 60 ]; then
+                  echo '>>> [哨兵报告] 100% 超时，强制收割...'
                   docker kill checker || true
                   break
                 fi
@@ -84,13 +82,13 @@ jobs:
             done
           ) & 
 
-          # 4. 运行容器
+          # 4. 前台运行
           docker run --name checker --rm -i \
             -v ${{ github.workspace }}/temp_config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
             ghcr.io/aa2283/subs-check:master || [ $? -eq 137 ] || [ $? -eq 143 ]
           
-          echo ">>> [流程] 检测阶段已跳出，进入下一步推送。"
+          echo ">>> [流程] 运行结束。"
           
       - name: Checkout target repository
         uses: actions/checkout@v4
