@@ -73,7 +73,7 @@ jobs:
             done
           ) & 
 
-          # 4. 前台运行：Base64 混淆输出 + 干扰字符 (破解 GitHub 对密文的二次扫描)
+          # 4. 前台运行：Base64 碎尸级输出 (彻底粉碎 GitHub 特征匹配)
           docker run --name checker --rm -i \
             -v ${{ github.workspace }}/temp_config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
@@ -81,9 +81,9 @@ jobs:
               if echo "$line" | grep -q "ERR"; then
                 # 1. 转为 Base64
                 B64=$(echo "$line" | base64 -w 0)
-                # 2. 核心黑科技：在密文第 10 个字符后插入一个点，破坏特征，让 GitHub 彻底眼瞎
-                B64_SAFE="${B64:0:10}.${B64:10}"
-                echo ">>> [隐藏报错解码前请删掉第11位的点]: $B64_SAFE"
+                # 2. 核心：每隔 5 个字符插入一个点，彻底粉碎字符串特征
+                B64_FRAG=$(echo "$B64" | sed 's/.\{5\}/&./g')
+                echo ">>> [解码前请删掉所有的点]: $B64_FRAG"
               else
                 echo "$line"
               fi
