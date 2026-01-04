@@ -87,16 +87,15 @@ jobs:
           path: target-repo
 
       - name: Copy and commit changes
+        env:
+          MY_DIR: "sub"  # 在这里统一改名字
         run: |
           cd target-repo
-          mkdir -p sub
-          # 清空 sub 文件夹旧内容
-          rm -rf sub/*
-          # 将生成的 all.yaml 等文件同步过去
-          cp -rv ../output/. sub/ || echo ">>> 未发现新生成的文件"
+          mkdir -p $MY_DIR
+          rm -f $MY_DIR/* || true
+          cp -rv ../output/. $MY_DIR/
           
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add sub/
-          # 检查是否有内容变更，有则提交推送
-          git diff --quiet && git diff --staged --quiet || (git commit -m "自动更新订阅：同步检测结果" && git push)
+          git add $MY_DIR/
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update nodes" && git push)
