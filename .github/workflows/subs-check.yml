@@ -14,68 +14,73 @@ jobs:
 
       - name: Run subscription checker
         run: |
-          # 1. 准备工作：先清理并创建目录
+          # 1. 环境初始化
           rm -rf ${{ github.workspace }}/output ${{ github.workspace }}/config
           mkdir -p ${{ github.workspace }}/output ${{ github.workspace }}/config
           chmod -R 777 ${{ github.workspace }}/output ${{ github.workspace }}/config
 
-          # 2. 核心修正：在启动 Docker 之前彻底完成配置文件的写入
-          # 这样容器启动时读取的是“静态文件”，不会触发“配置文件监听”的并发 Bug
+          # 2. 核心修正：构造包含强制进度展示的配置文件
+          # 加入 interval: 0 尝试关闭镜像内置的定时任务，防止冲突
           cat <<EOF > ${{ github.workspace }}/config/config.yaml
+          show-progress: true
+          print-progress: true
+          # 某些镜像用这个参数控制显示频率
+          progress-interval: 5
           sub-urls:
           $(echo "${{ secrets.SUB_URLS }}" | sed 's/^/  - /')
-          show-progress: true
           EOF
           
-          echo ">>> 配置文件静态写入完成。"
+          echo ">>> 配置文件已锁定。"
 
-          # 3. 智能观察者 (逻辑保持，但增加对“跳过”情况的监控)
+          # 3. 智能观察者 (增加“冲突即收割”逻辑)
           (
             echo ">>> [观察者] 已启动..."
             TIMER_STARTED=false 
             
             while true; do
-              sleep 10
-              LOG_RAW=$(docker logs checker 2>&1 | tail -n 10 | sed 's/\x1b\[[0-9;]*m//g')
+              sleep 15
+              # 扩大日志提取范围到 20 行，确保捕捉到进度
+              LOG_RAW=$(docker logs checker 2>&1 | tail -n 20 | sed 's/\x1b\[[0-9;]*m//g')
               
-              # 如果发现“跳过本次检测”，说明容器逻辑乱了，直接重启容器或强制杀掉
+              # A. 捕获到“已有检测正在进行”
               if echo "$LOG_RAW" | grep -q "已有检测正在进行"; then
-                echo ">>> [警告] 检测到并发冲突，强制终止并尝试收割..."
+                echo ">>> [观察者] 检测到程序自启动冲突，正在强制释放锁并收割..."
+                # 这种情况下通常第一波任务已经跑完或在后台跑，给它 60 秒写盘然后杀掉
+                sleep 60
                 docker stop checker
                 break
               fi
 
+              # B. 正常结束
               if echo "$LOG_RAW" | grep -q "保存本地成功"; then
-                echo ">>> [观察者] 任务圆满完成。"
+                echo ">>> [观察者] 任务完成。"
                 docker stop checker
                 break
               fi
 
-              # 进度对齐逻辑
+              # C. 进度条识别
               if [[ "$TIMER_STARTED" = false ]] && echo "$LOG_RAW" | grep -q "100.0%"; then
                 TIMER_STARTED=true
                 if echo "$LOG_RAW" | grep -qE "\(([0-9]+)/\1\)"; then
-                   WAIT_TIME=120
-                   echo ">>> [观察者] 数字真对齐，开启 2 分钟存盘缓冲..."
+                   echo ">>> [观察者] 进度真对齐，开启 2 分钟缓冲..."
+                   (sleep 120; docker stop checker || true) &
                 else
-                   WAIT_TIME=300
-                   echo ">>> [观察者] 数字未对齐，开启 5 分钟强杀..."
+                   echo ">>> [观察者] 节点卡死，开启 5 分钟强杀..."
+                   (sleep 300; docker stop checker || true) &
                 fi
-                (
-                  sleep $WAIT_TIME
-                  docker stop checker || true
-                ) &
               fi
+
               if ! docker ps | grep -q "checker"; then break; fi
             done
           ) &
 
           # 4. 运行容器
-          # 增加 --init 解决进程信号传递问题，确保进程能被正常杀掉并触发存盘
-          docker run --name checker --rm -t --init \
+          # 添加 -e PRINT_PROGRESS=true 作为环境变量补丁，并移除可能触发监听的 -t
+          docker run --name checker --rm --init \
             -v ${{ github.workspace }}/config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
-            ghcr.io/aa2283/subs-check:master || echo ">>> 容器运行结束。"
+            -e PRINT_PROGRESS=true \
+            ghcr.io/aa2283/subs-check:master || echo ">>> 容器已停止。"
 
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -90,9 +95,9 @@ jobs:
           TARGET_DIR="sub" 
           mkdir -p $TARGET_DIR
           rm -rf $TARGET_DIR/*
-          cp -rv ../output/. $TARGET_DIR/ || echo ">>> 警告：output 目录是空的，没有生成文件！"
+          cp -rv ../output/. $TARGET_DIR/ || echo ">>> 未发现新生成的文件"
           
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add $TARGET_DIR/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "自动更新：同步结果" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "自动更新" && git push)
