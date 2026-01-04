@@ -14,11 +14,11 @@ jobs:
 
       - name: Run subscription checker
         run: |
-          # 0. 准备环境
+          # 0. 准备输出目录
           mkdir -p ${{ github.workspace }}/output
           chmod -R 777 ${{ github.workspace }}/output
 
-          # 1. 智能守护监听器 (带 3 分钟延时缓冲)
+          # 1. 智能守护监听器 (解决卡在 100.0% 的问题)
           (
             echo ">>> [观察者] 已启动，正在监控任务状态..."
             WAS_HUNDRED=false
@@ -26,31 +26,31 @@ jobs:
             while true; do
               sleep 10  # 每 10 秒扫描一次日志
               
-              # 获取最后几行日志并去除 ANSI 颜色干扰
+              # 获取最后几行日志并去除 ANSI 颜色干扰字符
               LOG_TAIL=$(docker logs checker 2>&1 | tail -n 5 | sed 's/\x1b\[[0-9;]*m//g')
               
-              # 情况 A: 正常探测到程序自然输出的“保存成功”
+              # 情况 A: 正常探测到程序输出“保存本地成功”
               if echo "$LOG_TAIL" | grep -q "保存本地成功"; then
                 echo -e "\n[观察者] 捕获到程序自然存盘信号，正在解锁流程..."
                 docker stop checker
                 break
               fi
 
-              # 情况 B: 进度达到 100.0%，开启 3 分钟倒计时补丁
+              # 情况 B: 进度达到 100.0%，开启 3 分钟倒计时缓冲
               if [[ "$WAS_HUNDRED" = false ]] && echo "$LOG_TAIL" | grep -q "100.0%"; then
-                echo -e "\n[观察者] 检测到进度已达 100.0%，开启 3 分钟最终宽限时间..."
+                echo -e "\n[观察者] 检测到进度已达 100.0%，开启 3 分钟最终宽限时间，等待收尾..."
                 WAS_HUNDRED=true
-                # 在后台异步执行倒计时，不阻塞主循环
+                # 在后台异步执行倒计时
                 (
                   sleep 180
                   if docker ps | grep -q "checker"; then
-                    echo -e "\n[观察者] 3 分钟宽限期满，最后一个节点未响应，强制收割..."
+                    echo -e "\n[观察者] 3 分钟宽限期满，强制收割残留进程..."
                     docker stop checker
                   fi
                 ) &
               fi
 
-              # 如果容器已经自然退出，观察者也跟着退出
+              # 如果容器已经自然退出，观察者也退出
               if ! docker ps | grep -q "checker"; then break; fi
             done
           ) &
@@ -74,15 +74,18 @@ jobs:
         run: |
           cd target-repo
           
-          # 3. 彻底清理旧文件：删除除了 .git 以外的所有东西，保持仓库整洁
+          # 3. 彻底清理旧文件：删除除了 .git 以外的所有东西，防止文件堆积
           find . -maxdepth 1 ! -name "." ! -name ".." ! -name ".git" -exec rm -rf {} +
           
-          # 4. 同步最新生成的文件（不改名）
+          # 4. 同步最新生成的文件
           cp -rv ../output/* . || echo ">>> 未发现新生成的文件"
           
-          # 5. 提交并推送
+          # 5. 配置 Git 并提交
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add .
-          # 使用 -A 确保删除动作也被记录，如果有变化就提交推送
-          git diff --quiet && git diff --staged --quiet || (git commit -A -m "自动更新订阅：同步结果并清理冗余" && git push)
+          
+          # 关键修正点：使用 git add -A 记录所有增删，然后提交
+          git add -A
+          git commit -m "自动更新订阅：同步结果并清理冗余" || echo ">>> 内容无变更，跳过推送"
+          
+          git push
