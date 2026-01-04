@@ -14,7 +14,7 @@ jobs:
 
       - name: Run subscription checker
         run: |
-          # 1. 初始化目录和配置 (保持之前的 Python 注入逻辑)
+          # 1. 准备工作 (保持 Python 注入和双引号保护)
           mkdir -p ${{ github.workspace }}/output
           mkdir -p ${{ github.workspace }}/temp_config
           chmod -R 777 ${{ github.workspace }}/output
@@ -36,37 +36,49 @@ jobs:
               f.writelines(new_lines)
           "
 
-          # 2. 【核心改动】启动后台哨兵 (先启动，让它盯着待会儿开启的容器)
+          # 2. 【核心】后台哨兵：双重触发（信号触发 + 100% 倒计时触发）
           (
-            echo ">>> [哨兵] 已就位，等待存盘信号..."
+            echo ">>> [哨兵] 启动。监控：[保存信号] 或 [100% 卡死]..."
+            HUNDRED_TIME=0
             while true; do
-              sleep 5
-              # 如果容器还没启动，继续等
-              if ! docker ps | grep -q 'checker'; then continue; fi
+              sleep 10
+              if ! docker ps | grep -q 'checker'; then break; fi
               
-              # 读取日志末尾
-              LOGS=$(docker logs --tail 10 checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+              # 获取清洗后的日志
+              LOGS=$(docker logs --tail 20 checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
               
+              # 情况 A：检测到存盘成功信号
               if echo "$LOGS" | grep -q "保存本地成功"; then
-                echo "------------------------------------------------"
-                echo ">>> [哨兵] 捕捉到存盘成功！正在强制结束检测..."
-                echo "------------------------------------------------"
+                echo ">>> [哨兵] 命中存盘信号，立刻执行收割！"
                 docker kill checker || true
                 break
+              fi
+              
+              # 情况 B：检测到进度已达 100.0%
+              if echo "$LOGS" | grep -q "100.0%"; then
+                HUNDRED_TIME=$((HUNDRED_TIME + 10))
+                # 累计检测到 100% 状态超过 120 秒（2分钟）则强制收割
+                if [ $HUNDRED_TIME -ge 120 ]; then
+                  echo ">>> [哨兵] 进度卡在 100% 已达 2 分钟，执行保底收割..."
+                  docker kill checker || true
+                  break
+                fi
+              else
+                HUNDRED_TIME=0 # 如果进度掉下来了（虽然不太可能），重置计时
               fi
             done
           ) & 
 
-          # 3. 【恢复直观进度】前台运行容器
-          # 去掉 -d，换成 -i，这样你会看到满屏的进度条滚动
+          # 3. 前台运行，展示实时进度
+          # 允许退出码 137 (kill) 和 143 (stop) 视为成功
           docker run --name checker --rm -i \
             -v ${{ github.workspace }}/temp_config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
             ghcr.io/aa2283/subs-check:master || [ $? -eq 137 ] || [ $? -eq 143 ]
           
-          echo ">>> 检测环节结束，开始同步仓库。"
+          echo ">>> [流程] 检测环节圆满结束。"
 
-      # 4. 后续推送步骤保持不变...
+      # 4. 同步至目标仓库
       - name: Checkout target repository
         uses: actions/checkout@v4
         with:
@@ -83,4 +95,4 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add sub/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update $(date)" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update $(date +'%Y-%m-%d %H:%M')" && git push)
