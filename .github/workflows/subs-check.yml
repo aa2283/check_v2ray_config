@@ -14,11 +14,12 @@ jobs:
 
       - name: Run subscription checker
         run: |
-          # 1. 准备工作 (保持 Python 注入)
+          # 1. 准备工作
           mkdir -p ${{ github.workspace }}/output
           mkdir -p ${{ github.workspace }}/temp_config
           chmod -R 777 ${{ github.workspace }}/output
 
+          # 2. 简化的 Python 注入 (只负责填入链接)
           export RAW_URLS_DATA="${{ secrets.SUB_URLS }}"
           python3 -c "
           import os
@@ -26,42 +27,41 @@ jobs:
           output_path = '${{ github.workspace }}/temp_config/config.yaml'
           raw_urls = os.environ.get('RAW_URLS_DATA', '').strip().split('\n')
           formatted_urls = [f'  - \"{u.strip()}\"\n' for u in raw_urls if len(u.strip()) > 10]
-          new_lines = ['show-useless-url: true\n']
+          
+          new_lines = []
           with open(template_path, 'r', encoding='utf-8') as f:
               for line in f:
-                  if '{SUB_URLS}' in line: new_lines.extend(formatted_urls)
-                  elif 'show-useless-url' in line: continue
-                  else: new_lines.append(line)
+                  # 如果模板里已经写了 show-useless-url，这里就不再重复操作
+                  if '{SUB_URLS}' in line: 
+                      new_lines.extend(formatted_urls)
+                  else: 
+                      new_lines.append(line)
+          
           with open(output_path, 'w', encoding='utf-8') as f:
               f.writelines(new_lines)
           "
 
-          # 2. 【增强版哨兵】新增“节点为空”监听
+          # 3. 增强版哨兵 (监听：成功、为空、倒计时)
           (
-            echo ">>> [哨兵] 启动成功，监控中..."
+            echo ">>> [哨兵] 启动成功..."
             HUNDRED_TIME=0
             while true; do
               sleep 10
               if ! docker ps | grep -q 'checker'; then break; fi
               
-              # 抓取并清洗日志
               LOGS=$(docker logs --tail 20 checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
               
-              # 信号 A：结束信号监听 (存盘成功 或 节点为空跳过)
-              # 使用 -E 参数同时匹配两个结束条件
+              # 核心监听：只要出现“保存成功”或“节点为空”，立刻收网
               if echo "$LOGS" | grep -qE "保存本地成功|节点为空，跳过保存"; then
-                echo ">>> [哨兵报告] 检测到程序运行结束信号（存盘成功或结果为空）。即将杀掉进程..."
+                echo ">>> [哨兵报告] 监测到程序运行结束信号。即将杀掉进程同步..."
                 docker kill checker || true
                 break
               fi
               
-              # 信号 B：进度 100% 倒计时
               if echo "$LOGS" | grep -q "100.0%"; then
                 HUNDRED_TIME=$((HUNDRED_TIME + 10))
-                echo ">>> [哨兵报告] 检测到进度 100%，存盘保底倒计时: ${HUNDRED_TIME}/120 秒"
-                
+                echo ">>> [哨兵报告] 进度 100%，倒计时: ${HUNDRED_TIME}/120 秒"
                 if [ $HUNDRED_TIME -ge 120 ]; then
-                  echo ">>> [哨兵报告] 倒计时结束！强制收割..."
                   docker kill checker || true
                   break
                 fi
@@ -71,8 +71,7 @@ jobs:
             done
           ) & 
 
-          # 3. 前台运行 (展示进度条)
-          # 增加 2>&1 | stdbuf -oL cat 确保日志输出更实时，不影响正常显示
+          # 4. 前台运行
           docker run --name checker --rm -i \
             -v ${{ github.workspace }}/temp_config:/app/config \
             -v ${{ github.workspace }}/output:/app/output \
