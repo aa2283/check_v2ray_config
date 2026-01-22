@@ -44,7 +44,7 @@ jobs:
           # A. 从 KV 恢复 sub-store.json (使用二进制安全模式)
           echo "📥 正在从 KV 恢复 sub-store.json..."
           curl -s -L -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
-            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_ID }}/values/SUB_STORE_CONFIG" \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_ID }}/values/SUB_STORE_CONFIG_2" \
             -o output/sub-store.json
 
           if [ -s "output/sub-store.json" ] && jq . output/sub-store.json > /dev/null 2>&1; then
@@ -128,7 +128,7 @@ jobs:
             echo "📢 [$(date +'%H:%M:%S')] 检测到更新，开始执行同步..."
             
             # A. 同步 KV
-            curl -s -X PUT "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_ID }}/values/SUB_STORE_CONFIG" \
+            curl -s -X PUT "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_ID }}/values/SUB_STORE_CONFIG_2" \
               -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
               --data-binary @output/sub-store.json > /dev/null
 
