@@ -135,18 +135,18 @@ jobs:
             # B. 下载订阅列表
             local LIST="${{ vars.SUB_LIST || 'zh:ClashMeta' }}"
             IFS=',' read -ra ITEMS <<< "$LIST"
-            mkdir -p backup_repo/sub_config/
+            mkdir -p backup_repo/subs/
             
             for item in "${ITEMS[@]}"; do
               local NAME="${item%%:*}"
               local TYPE="${item##*:}"
               local EXT="txt"
               [[ "$TYPE" == *"Clash"* ]] && EXT="yaml"
-              curl -s "http://127.0.0.1:8299/download/${NAME}?target=${TYPE}" -o "backup_repo/sub_config/${NAME}.${EXT}"
+              curl -s "http://127.0.0.1:8299/download/${NAME}?target=${TYPE}" -o "backup_repo/subs/${NAME}.${EXT}"
             done
 
             # C. 备份 JSON 并推送到 GitHub
-            cp -f output/sub-store.json backup_repo/sub_config/sub-store.json
+            cp -f output/sub-store.json backup_repo/subs/sub-store.json
             
             pushd backup_repo > /dev/null
             git add .
