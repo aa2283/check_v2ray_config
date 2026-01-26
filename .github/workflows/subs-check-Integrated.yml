@@ -1,4 +1,4 @@
-name: Sub-Store-132 Dual-Tunnel-Integrated-Final
+name: Sub-Store Dual-Tunnel-Integrated-Final
 on:
   schedule:
     - cron: '15 3 * * *'
