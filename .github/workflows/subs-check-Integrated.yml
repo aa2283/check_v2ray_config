@@ -1,193 +1,103 @@
-name: Sub-Store Dual-Tunnel-Integrated-Final
+name: Subscription Checker
+
 on:
-  schedule:
-    - cron: '15 3 * * *'
+  #schedule:
+    #- cron: '15 3 * * *'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  run-service:
+  check-subscriptions:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 检出仓库
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 2. 环境与双隧道准备
+      - name: Run subscription checker
         run: |
-          mkdir -p output temp_config
-          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
-          chmod +x cloudflared
-          touch tunnel_8299.log tunnel_8199.log
+          # 1. 准备工作 (保持 Python 注入)
+          mkdir -p ${{ github.workspace }}/output
+          mkdir -p ${{ github.workspace }}/temp_config
+          chmod -R 777 ${{ github.workspace }}/output
 
-          nohup ./cloudflared tunnel --url http://127.0.0.1:8299 --logfile tunnel_8299.log > /dev/null 2>&1 &
-          nohup ./cloudflared tunnel --url http://127.0.0.1:8199 --http-host-header "localhost:8199" --logfile tunnel_8199.log > /dev/null 2>&1 &
-
-          echo "⏳ 正在等待隧道域名生成..."
-          for i in {1..20}; do
-            URL_8299=$(grep -oE 'https://[-0-9a-z]*\.trycloudflare\.com' tunnel_8299.log | head -n 1)
-            URL_8199=$(grep -oE 'https://[-0-9a-z]*\.trycloudflare\.com' tunnel_8199.log | head -n 1)
-            if [ -n "$URL_8299" ] && [ -n "$URL_8199" ]; then
-              echo "::add-mask::$URL_8299"
-              echo "::add-mask::$URL_8199"
-              curl -s -X PUT "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_ID }}/values/URL_8299_2" -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" -d "$URL_8299"
-              curl -s -X PUT "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_ID }}/values/URL_8199_2" -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" -d "$URL_8199"
-              echo "✅ 双隧道已同步至 KV"
-              break
-            fi
-            sleep 1
-          done
-
-      - name: 3. 配置恢复与 Python 订阅注入
-        run: |
-          # A. 从 KV 恢复 sub-store.json (使用二进制安全模式)
-          echo "📥 正在从 KV 恢复 sub-store.json..."
-          curl -s -L -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
-            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_ID }}/values/SUB_STORE_CONFIG_2" \
-            -o output/sub-store.json
-
-          if [ -s "output/sub-store.json" ] && jq . output/sub-store.json > /dev/null 2>&1; then
-            echo "✅ 配置恢复成功"
-          else
-            echo "⚠️ KV 为空或格式非法，初始化默认配置"
-            echo '{"subscribes":[],"nodes":[],"sub-store-backend":[]}' > output/sub-store.json
-          fi
-
-          # B. 【核心回归】Python 注入 SUB_URLS 到 config.yaml
-          echo "📝 正在注入隐藏订阅..."
           export RAW_URLS_DATA="${{ secrets.SUB_URLS }}"
           python3 -c "
           import os
-          template_path = 'config/config.yaml'
-          output_path = 'temp_config/config.yaml'
+          template_path = '${{ github.workspace }}/config/config.yaml'
+          output_path = '${{ github.workspace }}/temp_config/config.yaml'
           raw_urls = os.environ.get('RAW_URLS_DATA', '').strip().split('\n')
-          # 过滤无效链接
           formatted_urls = [f'  - \"{u.strip()}\"\n' for u in raw_urls if len(u.strip()) > 10]
           new_lines = ['show-useless-url: true\n']
-          
-          if os.path.exists(template_path):
-              with open(template_path, 'r', encoding='utf-8') as f:
-                  for line in f:
-                      if '{SUB_URLS}' in line: 
-                          new_lines.extend(formatted_urls)
-                      elif 'show-useless-url' in line: 
-                          continue
-                      else: 
-                          new_lines.append(line)
-          else:
-              # 如果没有模板，生成最简配置
-              new_lines.append('subscribes:\n')
-              new_lines.extend(formatted_urls)
-
+          with open(template_path, 'r', encoding='utf-8') as f:
+              for line in f:
+                  if '{SUB_URLS}' in line: new_lines.extend(formatted_urls)
+                  elif 'show-useless-url' in line: continue
+                  else: new_lines.append(line)
           with open(output_path, 'w', encoding='utf-8') as f:
               f.writelines(new_lines)
           "
-          
-          # C. 统一权限修正
-          sudo chmod -R 777 output temp_config
 
-      - name: 4. 启动容器 (修正挂载路径)
-        run: |
-          # 彻底清理旧残留
-          docker rm -f checker || true
-          
-          echo "🚀 启动容器中..."
-          # 挂载说明：
-          # 1. /app/config -> 注入了 SUB_URLS 的 config.yaml
-          # 2. /app/output 和 /opt/sub-store/data -> 指向同一个 output 目录，包含恢复的 json
-          docker run --name checker -d \
-            -p 8299:8299 -p 8199:8199 \
-            -v ${{ github.workspace }}/temp_config:/app/config \
-            -v ${{ github.workspace }}/output:/app/output \
-            -v ${{ github.workspace }}/output:/opt/sub-store/data \
-            ghcr.io/aa2283/subs-check:master
-
-          sleep 10
-          # 状态检查
-          if ! docker ps | grep -q 'checker'; then
-            echo "❌ 容器启动失败，打印日志："
-            docker logs checker
-            exit 1
-          fi
-          echo "✅ 容器运行正常"
-
-      - name: 5. 挂机锁定与单向备份 (语法修复版)
-        run: |
-          # 1. 环境准备
-          rm -rf backup_repo
-          git clone "https://${{ secrets.PAT_TOKEN }}@github.com/aa2283/v2ray_configs.git" backup_repo
-          git config --global user.email "bot@github.com"
-          git config --global user.name "AutoBot"
-          
-          # 初始快照
-          cp -f output/sub-store.json ./snapshot.json
-
-          # 2. 定义备份函数 (避免在后台块中使用复杂的字符串导致语法错误)
-          do_backup() {
-            echo "📢 [$(date +'%H:%M:%S')] 检测到更新，开始执行同步..."
-            
-            # A. 同步 KV
-            curl -s -X PUT "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_ID }}/values/SUB_STORE_CONFIG_2" \
-              -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
-              --data-binary @output/sub-store.json > /dev/null
-
-            # B. 下载订阅列表
-            local LIST="${{ vars.SUB_LIST || 'zh:ClashMeta' }}"
-            IFS=',' read -ra ITEMS <<< "$LIST"
-            mkdir -p backup_repo/subs/
-            
-            for item in "${ITEMS[@]}"; do
-              local NAME="${item%%:*}"
-              local TYPE="${item##*:}"
-              local EXT="txt"
-              [[ "$TYPE" == *"Clash"* ]] && EXT="yaml"
-              curl -s "http://127.0.0.1:8299/download/${NAME}?target=${TYPE}" -o "backup_repo/subs/${NAME}.${EXT}"
-            done
-
-            # C. 备份 JSON 并推送到 GitHub
-            cp -f output/sub-store.json backup_repo/subs/sub-store.json
-            
-            pushd backup_repo > /dev/null
-            git add .
-            if [ -n "$(git status --porcelain)" ]; then
-              git commit -m "🔖 Auto Backup: $(date +'%H:%M:%S')"
-              git pull --rebase origin main && git push origin main
-              echo "✅ 仓库同步成功"
-            fi
-            popd > /dev/null
-            
-            # 更新快照
-            cp -f output/sub-store.json ./snapshot.json
-          }
-
-          # 3. 启动后台哨兵
+          # 2. 【核心修改】哨兵：现在同时监听“保存成功”和“节点为空”
           (
-            echo "🚀 哨兵已就绪，监控中..."
+            echo ">>> [哨兵] 启动成功，正在暗中观察..."
+            HUNDRED_TIME=0
             while true; do
-              sleep 30
-              # 确保容器还在运行
+              sleep 10
               if ! docker ps | grep -q 'checker'; then break; fi
               
-              # 比对差异
-              if ! diff -q output/sub-store.json ./snapshot.json >/dev/null 2>&1; then
-                # 校验 JSON 大小和格式
-                if [ $(stat -c%s output/sub-store.json) -gt 100 ] && jq . output/sub-store.json > /dev/null 2>&1; then
-                  do_backup
+              # 抓取并清洗日志
+              LOGS=$(docker logs --tail 20 checker 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+              
+              # 信号 A：检测到“保存本地成功”或者“节点为空，跳过保存”
+              if echo "$LOGS" | grep -qE "保存本地成功|节点为空，跳过保存"; then
+                echo ">>> [哨兵报告] 检测到程序已输出结束信号（存盘成功或结果为空）！即将强制杀掉进程同步..."
+                docker kill checker || true
+                break
+              fi
+              
+              # 信号 B：进度 100% 倒计时
+              if echo "$LOGS" | grep -q "100.0%"; then
+                HUNDRED_TIME=$((HUNDRED_TIME + 10))
+                echo ">>> [哨兵报告] 检测到进度 100%，存盘保底倒计时: ${HUNDRED_TIME}/120 秒"
+                
+                if [ $HUNDRED_TIME -ge 120 ]; then
+                  echo ">>> [哨兵报告] 倒计时结束！执行强制收割..."
+                  docker kill checker || true
+                  break
                 fi
+              else
+                HUNDRED_TIME=0
               fi
             done
-          ) &
-          SENTINEL_PID=$! # 重点：记录哨兵进程的 ID
+          ) & 
 
-          # 4. 主进程挂机
-          echo "🌐 服务已完全启动"
-          for i in {15..1}; do
-            echo "⏳ 在线守护中... 剩余 $i 分钟"
-            sleep 60
-          done
+          # 3. 前台运行 (展示进度条)
+          docker run --name checker --rm -i \
+            -v ${{ github.workspace }}/temp_config:/app/config \
+            -v ${{ github.workspace }}/output:/app/output \
+            ghcr.io/aa2283/subs-check:master || [ $? -eq 137 ] || [ $? -eq 143 ]
+          
+          echo ">>> [流程] 检测阶段已跳出，进入下一步推送。"
+          
+          
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: aa2283/v2ray_configs
+          token: ${{ secrets.PAT_TOKEN }}
+          path: target-repo
 
-          # 5. 优雅清理（防止最后一分钟报错）
-          echo "🧹 倒计时结束，正在清理进程..."
-          kill $SENTINEL_PID || true
-          docker rm -f checker || true
+      - name: Copy and commit changes
+        run: |
+          cd target-repo
+          mkdir -p sub
+          rm -f sub/* || true
+          cp -rv ../output/. sub/
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add sub/
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "自动更新: $(date +'%Y-%m-%d %H:%M')"
+            git push
+          else
+            echo ">>> 无内容变动，跳过推送。"
+          fi
