@@ -1,7 +1,7 @@
 name: Sub-Store Dual-Tunnel-Integrated-Final
 on:
   schedule:
-    - cron: '15 3 * * *'
+    - cron: '15 2 * * *'
   workflow_dispatch:
 
 permissions:
